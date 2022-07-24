@@ -6160,55 +6160,91 @@ ufunc_at(PyUFuncObject *ufunc, PyObject *args)
         NPY_BEGIN_THREADS;
     }
 
+    int ndim = PyArray_NDIM(op1_array);
+    npy_bool same_type = PyArray_TYPE(op1_array) == PyArray_TYPE(op2_array);
+    npy_bool basic_type = !PyArray_ISEXTENDED(op1_array) && !PyTypeNum_ISOBJECT(op1_array);
+
+    int res = 0;
+
     /*
      * Iterate over first and second operands and call ufunc
      * for each pair of inputs
      */
-    int res = 0;
-    for (npy_intp i = iter->size; i > 0; i--)
+
+    /*
+     * Optimization for non scalar computation 
+     * with binary ufuncs and without required conversions/reference-counting
+     */
+    if(ndim >= 1 && nop == 3 && same_type && basic_type)
     {
         char *dataptr[3];
-        char **buffer_dataptr;
+        npy_intp iter_size = iter->size;
+
         /* one element at a time, no stride required but read by innerloop */
         npy_intp count = 1;
 
-        /*
-         * Set up data pointers for either one or two input operands.
-         * The output data pointer points to the first operand data.
-         */
-        dataptr[0] = iter->dataptr;
-        if (iter2 != NULL) {
+        for (npy_intp i = iter_size; i > 0; i--)
+        {
+            dataptr[0] = dataptr[2] = iter->dataptr;
             dataptr[1] = PyArray_ITER_DATA(iter2);
-            dataptr[2] = iter->dataptr;
-        }
-        else {
-            dataptr[1] = iter->dataptr;
-            dataptr[2] = NULL;
-        }
 
-        /* Reset NpyIter data pointers which will trigger a buffer copy */
-        NpyIter_ResetBasePointers(iter_buffer, dataptr, &err_msg);
-        if (err_msg) {
-            res = -1;
-            break;
-        }
+            res = strided_loop(&context, dataptr, &count, strides, auxdata);
+            if (res != 0)
+                break;
 
-        buffer_dataptr = NpyIter_GetDataPtrArray(iter_buffer);
-
-        res = strided_loop(&context, buffer_dataptr, &count, strides, auxdata);
-        if (res != 0) {
-            break;
-        }
-
-        /*
-         * Call to iternext triggers copy from buffer back to output array
-         * after innerloop puts result in buffer.
-         */
-        iternext(iter_buffer);
-
-        PyArray_MapIterNext(iter);
-        if (iter2 != NULL) {
+            PyArray_MapIterNext(iter);
             PyArray_ITER_NEXT(iter2);
+        }
+    }
+
+    /* Slower fallback generic computation (for corner-cases) */
+    else
+    {
+        for (npy_intp i = iter->size; i > 0; i--)
+        {
+            char *dataptr[3];
+            char **buffer_dataptr;
+            /* one element at a time, no stride required but read by innerloop */
+            npy_intp count = 1;
+
+            /*
+             * Set up data pointers for either one or two input operands.
+             * The output data pointer points to the first operand data.
+             */
+            dataptr[0] = iter->dataptr;
+            if (iter2 != NULL) {
+                dataptr[1] = PyArray_ITER_DATA(iter2);
+                dataptr[2] = iter->dataptr;
+            }
+            else {
+                dataptr[1] = iter->dataptr;
+                dataptr[2] = NULL;
+            }
+
+            /* Reset NpyIter data pointers which will trigger a buffer copy */
+            NpyIter_ResetBasePointers(iter_buffer, dataptr, &err_msg);
+            if (err_msg) {
+                res = -1;
+                break;
+            }
+
+            buffer_dataptr = NpyIter_GetDataPtrArray(iter_buffer);
+
+            res = strided_loop(&context, buffer_dataptr, &count, strides, auxdata);
+            if (res != 0) {
+                break;
+            }
+
+            /*
+             * Call to iternext triggers copy from buffer back to output array
+             * after innerloop puts result in buffer.
+             */
+            iternext(iter_buffer);
+
+            PyArray_MapIterNext(iter);
+            if (iter2 != NULL) {
+                PyArray_ITER_NEXT(iter2);
+            }
         }
     }
 
